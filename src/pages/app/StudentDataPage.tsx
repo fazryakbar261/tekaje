@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { useAuth } from '../../context/AuthContext';
+import { safeParseJson } from '../../lib/supabase';
 import {
   deleteClassRoomById,
   deleteStudentById,
@@ -150,13 +151,13 @@ export function StudentDataPage() {
       const res = await fetch('/api/admin/database-status', {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          hasDbUrl: boolean;
-          tables: DatabaseTableStatus[];
-          schemaSql: string;
-        };
-        setDbStatus(data);
+      const parsed = await safeParseJson<{
+        hasDbUrl: boolean;
+        tables: DatabaseTableStatus[];
+        schemaSql: string;
+      }>(res);
+      if (parsed.ok && parsed.data) {
+        setDbStatus(parsed.data);
       }
     } finally {
       setLoadingDbStatus(false);
@@ -394,13 +395,15 @@ export function StudentDataPage() {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      const payload = (await res.json()) as { message?: string; error?: string };
-      if (!res.ok) {
-        setErrorMsg(payload.error || 'Gagal mengisi data relasional awal.');
+      const parsed = await safeParseJson<{ message?: string; error?: string }>(res);
+      if (!parsed.ok) {
+        setErrorMsg(parsed.errorText || 'Gagal mengisi data relasional awal.');
       } else {
-        setFeedback(payload.message || 'Data awal berhasil diisi.');
+        setFeedback(parsed.data?.message || 'Data awal berhasil diisi.');
         await Promise.all([loadAll(), loadDbStatus()]);
       }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghubungi server.');
     } finally {
       setSeedingDb(false);
     }
@@ -416,13 +419,15 @@ export function StudentDataPage() {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      const payload = (await res.json()) as { message?: string; error?: string };
-      if (!res.ok) {
-        setErrorMsg(payload.error || 'Gagal menjalankan migrasi SQL.');
+      const parsed = await safeParseJson<{ message?: string; error?: string }>(res);
+      if (!parsed.ok) {
+        setErrorMsg(parsed.errorText || 'Gagal menjalankan migrasi SQL.');
       } else {
-        setFeedback(payload.message || 'Migrasi skema relasional selesai.');
+        setFeedback(parsed.data?.message || 'Migrasi skema relasional selesai.');
         await Promise.all([loadAll(), loadDbStatus()]);
       }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghubungi server.');
     } finally {
       setMigratingDb(false);
     }

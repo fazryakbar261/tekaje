@@ -13,7 +13,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { getAppMode, supabase } from '../lib/supabase';
+import { getAppMode, initRuntimeConfig, safeParseJson, supabase } from '../lib/supabase';
 import type { UserProfile } from '../types';
 
 interface BootstrapStatus {
@@ -60,10 +60,10 @@ export function LoginPage() {
     async function checkBootstrap() {
       try {
         const res = await fetch('/api/auth/bootstrap-status');
-        if (res.ok) {
-          const data = (await res.json()) as BootstrapStatus;
-          setBootstrap(data);
-          if (data.canRegisterFirstAdmin) {
+        const parsed = await safeParseJson<BootstrapStatus>(res);
+        if (parsed.ok && parsed.data) {
+          setBootstrap(parsed.data);
+          if (parsed.data.canRegisterFirstAdmin) {
             setMode('first-admin');
           }
         }
@@ -87,7 +87,8 @@ export function LoginPage() {
 
     setSubmitting(true);
     try {
-      if (getAppMode() === 'local') {
+      const currentMode = await initRuntimeConfig(true);
+      if (currentMode === 'local') {
         const res = await fetch('/api/local/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -96,18 +97,18 @@ export function LoginPage() {
             password,
           }),
         });
-        const payload = (await res.json()) as {
+        const parsed = await safeParseJson<{
           token?: string;
           profile?: UserProfile;
           error?: string;
-        };
+        }>(res);
 
-        if (!res.ok || !payload.token || !payload.profile) {
-          setErrorMsg(payload.error || 'Email atau kata sandi salah.');
+        if (!parsed.ok || !parsed.data?.token || !parsed.data?.profile) {
+          setErrorMsg(parsed.errorText || 'Email atau kata sandi salah.');
           return;
         }
 
-        setLocalSession(payload.token, payload.profile);
+        setLocalSession(parsed.data.token, parsed.data.profile);
         navigate('/app', { replace: true });
         return;
       }
@@ -153,8 +154,9 @@ export function LoginPage() {
 
     setSubmitting(true);
     try {
+      const currentMode = await initRuntimeConfig(true);
       // If Supabase mode WITHOUT service role, use standard client signUp
-      if (getAppMode() === 'supabase' && !bootstrap?.hasServiceRole && supabase) {
+      if (currentMode === 'supabase' && !bootstrap?.hasServiceRole && supabase) {
         const { data, error: signUpErr } = await supabase.auth.signUp({
           email: email.trim().toLowerCase(),
           password,
@@ -194,17 +196,18 @@ export function LoginPage() {
         }),
       });
 
-      const payload = (await res.json()) as {
+      const parsed = await safeParseJson<{
         error?: string;
         message?: string;
         token?: string;
         profile?: UserProfile;
-      };
-      if (!res.ok) {
-        setErrorMsg(payload.error || 'Gagal membuat akun Administrator pertama.');
+      }>(res);
+      if (!parsed.ok || !parsed.data) {
+        setErrorMsg(parsed.errorText || 'Gagal membuat akun Administrator pertama.');
         return;
       }
 
+      const payload = parsed.data;
       if (getAppMode() === 'local' && payload.token && payload.profile) {
         setLocalSession(payload.token, payload.profile);
         await refreshHealth();

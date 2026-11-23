@@ -1,4 +1,4 @@
-import { getAppMode, supabase } from './supabase';
+import { getAppMode, safeParseJson, supabase } from './supabase';
 import type {
   ClassRoom,
   EmployeeAttendance,
@@ -45,11 +45,11 @@ async function localFetch<T>(url: string, token: string, init?: RequestInit): Pr
       ...(init?.headers || {}),
     },
   });
-  const payload = (await res.json()) as T & { error?: string };
-  if (!res.ok) {
-    throw new Error(payload.error || 'Terjadi kesalahan pada server.');
+  const parsed = await safeParseJson<T>(res);
+  if (!parsed.ok || !parsed.data) {
+    throw new Error(parsed.errorText || 'Terjadi kesalahan pada server.');
   }
-  return payload;
+  return parsed.data;
 }
 
 export async function fetchDashboardData(params: {

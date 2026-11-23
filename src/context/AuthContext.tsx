@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
-import { getAppMode, initRuntimeConfig, supabase } from '../lib/supabase';
+import { getAppMode, initRuntimeConfig, safeParseJson, supabase } from '../lib/supabase';
 import { clearLocalToken, getLocalToken, setLocalToken } from '../lib/dataService';
 import type { SystemHealth, UserProfile } from '../types';
 
@@ -47,10 +47,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshHealth = useCallback(async () => {
     try {
       const res = await fetch('/api/health');
-      if (res.ok) {
-        const data = (await res.json()) as SystemHealth;
-        setHealth(data);
-        if (data.mode) setAppMode(data.mode);
+      const parsed = await safeParseJson<SystemHealth>(res);
+      if (parsed.ok && parsed.data) {
+        setHealth(parsed.data);
+        if (parsed.data.mode) {
+          setAppMode(parsed.data.mode);
+          if (parsed.data.mode !== getAppMode()) {
+            await initRuntimeConfig(true);
+          }
+        }
       }
     } catch {
       // Ignore network errors during health check
@@ -91,8 +96,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           Authorization: `Bearer ${activeSession.access_token}`,
         },
       });
-      if (syncRes.ok) {
-        const payload = (await syncRes.json()) as { profile: UserProfile };
+      const parsed = await safeParseJson<{ profile: UserProfile }>(syncRes);
+      if (parsed.ok && parsed.data?.profile) {
+        const payload = parsed.data;
         if (!payload.profile.is_active) {
           await supabase.auth.signOut();
           setSession(null);
@@ -147,9 +153,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch('/api/local/auth/me', {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        const data = (await res.json()) as { profile: UserProfile };
-        setProfile(data.profile);
+      const parsed = await safeParseJson<{ profile: UserProfile }>(res);
+      if (parsed.ok && parsed.data?.profile) {
+        setProfile(parsed.data.profile);
       }
       return;
     }
@@ -176,8 +182,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const res = await fetch('/api/local/auth/me', {
               headers: { Authorization: `Bearer ${token}` },
             });
-            if (res.ok && mounted) {
-              const payload = (await res.json()) as { profile: UserProfile };
+            const parsed = await safeParseJson<{ profile: UserProfile }>(res);
+            if (parsed.ok && parsed.data?.profile && mounted) {
+              const payload = parsed.data;
               setSession({
                 access_token: token,
                 user: { id: payload.profile.id, email: payload.profile.email },

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Edit2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { useAuth } from '../../context/AuthContext';
+import { safeParseJson } from '../../lib/supabase';
 import { ROLE_LABELS, formatShortDate } from '../../lib/constants';
 import type { UserProfile, UserRole } from '../../types';
 
@@ -59,12 +60,12 @@ export function UserManagementPage() {
           Authorization: `Bearer ${session.access_token}`,
         },
       });
-      const payload = (await res.json()) as { users?: UserProfile[]; error?: string };
-      if (!res.ok) {
-        setErrorMsg(payload.error || 'Gagal mengambil daftar pengguna.');
+      const parsed = await safeParseJson<{ users?: UserProfile[]; error?: string }>(res);
+      if (!parsed.ok || !parsed.data) {
+        setErrorMsg(parsed.errorText || 'Gagal mengambil daftar pengguna.');
         return;
       }
-      setUsers(payload.users || []);
+      setUsers(parsed.data.users || []);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Gagal terhubung ke server.');
     } finally {
@@ -159,9 +160,9 @@ export function UserManagementPage() {
         body: JSON.stringify(bodyPayload),
       });
 
-      const payload = (await res.json()) as { error?: string };
-      if (!res.ok) {
-        setFormError(payload.error || 'Gagal menyimpan data pengguna.');
+      const parsed = await safeParseJson<{ error?: string }>(res);
+      if (!parsed.ok) {
+        setFormError(parsed.errorText || 'Gagal menyimpan data pengguna.');
         return;
       }
 
@@ -192,12 +193,12 @@ export function UserManagementPage() {
           Authorization: `Bearer ${session.access_token}`,
         },
       });
-      const payload = (await res.json()) as { error?: string; message?: string };
-      if (!res.ok) {
-        setErrorMsg(payload.error || 'Gagal menghapus pengguna.');
+      const parsed = await safeParseJson<{ error?: string; message?: string }>(res);
+      if (!parsed.ok) {
+        setErrorMsg(parsed.errorText || 'Gagal menghapus pengguna.');
       } else {
         setFeedback(
-          payload.message ||
+          parsed.data?.message ||
             `Akun ${deleteTarget.full_name} berhasil dihapus permanen hingga ke Supabase Authentication.`,
         );
         await loadUsers();

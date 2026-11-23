@@ -1740,6 +1740,19 @@ async function createServer(): Promise<void> {
     },
   );
 
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
+  });
+
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/')) {
+      const message = err instanceof Error ? err.message : 'Terjadi kesalahan internal server.';
+      res.status(500).json({ error: message });
+      return;
+    }
+    next(err);
+  });
+
   // Vite dev middleware vs static production serving
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');

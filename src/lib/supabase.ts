@@ -38,18 +38,50 @@ export function getAppMode(): 'supabase' | 'local' {
   return runtimeMode;
 }
 
-export async function initRuntimeConfig(): Promise<'supabase' | 'local'> {
-  if (initialized) return runtimeMode;
-  initialized = true;
+export async function safeParseJson<T>(res: Response): Promise<{
+  ok: boolean;
+  data: (T & { error?: string }) | null;
+  errorText: string | null;
+}> {
+  const raw = await res.text();
+  if (!raw) {
+    return {
+      ok: res.ok,
+      data: null,
+      errorText: res.ok ? null : `Server merespons status HTTP ${res.status}.`,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw) as T & { error?: string };
+    return {
+      ok: res.ok,
+      data: parsed,
+      errorText: !res.ok ? parsed.error || `Permintaan gagal (HTTP ${res.status}).` : null,
+    };
+  } catch {
+    const snippet = raw.replace(/\s+/g, ' ').trim().slice(0, 120);
+    return {
+      ok: false,
+      data: null,
+      errorText: `Respons server bukan JSON (HTTP ${res.status}). Muat ulang halaman atau tunggu beberapa detik. (${snippet})`,
+    };
+  }
+}
+
+export async function initRuntimeConfig(force = false): Promise<'supabase' | 'local'> {
+  if (initialized && !force) return runtimeMode;
 
   try {
     const res = await fetch('/api/config');
-    if (res.ok) {
-      const cfg = (await res.json()) as {
-        mode: 'supabase' | 'local';
-        supabaseUrl?: string;
-        supabaseAnonKey?: string;
-      };
+    const parsed = await safeParseJson<{
+      mode: 'supabase' | 'local';
+      supabaseUrl?: string;
+      supabaseAnonKey?: string;
+    }>(res);
+
+    if (parsed.ok && parsed.data) {
+      const cfg = parsed.data;
+      initialized = true;
       runtimeMode = cfg.mode;
 
       if (
@@ -76,8 +108,9 @@ export async function initRuntimeConfig(): Promise<'supabase' | 'local'> {
       }
     }
   } catch {
-    // Fallback to build-time env vars
+    // Fallback to build-time env vars and allow retry
   }
 
   return runtimeMode;
 }
+
