@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, Search } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/AuthContext';
+import { fetchAllEmployeeAttendance } from '../../lib/dataService';
 import {
   EMPLOYEE_STATUS_META,
   ROLE_LABELS,
@@ -13,6 +14,7 @@ import {
 import type { EmployeeAttendance, UserRole } from '../../types';
 
 export function EmployeeRecapPage() {
+  const { session } = useAuth();
   const monthPrefix = getCurrentMonthPrefix();
   const [startDate, setStartDate] = useState(`${monthPrefix}-01`);
   const [endDate, setEndDate] = useState(getTodayIsoDate());
@@ -24,7 +26,7 @@ export function EmployeeRecapPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadRecap = useCallback(async () => {
-    if (!supabase) {
+    if (!session?.access_token) {
       setLoading(false);
       return;
     }
@@ -32,24 +34,18 @@ export function EmployeeRecapPage() {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const { data, error } = await supabase
-        .from('employee_attendance')
-        .select('*, profiles(full_name, email, nip, role, jabatan)')
-        .gte('tanggal', startDate)
-        .lte('tanggal', endDate)
-        .order('tanggal', { ascending: false })
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        setErrorMsg(error.message);
-        return;
-      }
-
-      setRecords((data as EmployeeAttendance[]) || []);
+      const data = await fetchAllEmployeeAttendance({
+        accessToken: session.access_token,
+        startDate,
+        endDate,
+      });
+      setRecords(data);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal memuat rekap absensi.');
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate]);
+  }, [session?.access_token, startDate, endDate]);
 
   useEffect(() => {
     loadRecap();

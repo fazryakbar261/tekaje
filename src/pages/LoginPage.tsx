@@ -13,9 +13,11 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { supabase } from '../lib/supabase';
+import { getAppMode, supabase } from '../lib/supabase';
+import type { UserProfile } from '../types';
 
 interface BootstrapStatus {
+  mode: 'supabase' | 'local';
   configured: boolean;
   hasServiceRole: boolean;
   tablesReady: boolean;
@@ -24,7 +26,16 @@ interface BootstrapStatus {
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { session, loading, authError, clearAuthError, health, refreshHealth } = useAuth();
+  const {
+    session,
+    loading,
+    authError,
+    clearAuthError,
+    health,
+    appMode,
+    refreshHealth,
+    setLocalSession,
+  } = useAuth();
 
   const [mode, setMode] = useState<'login' | 'first-admin'>('login');
   const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null);
@@ -52,6 +63,9 @@ export function LoginPage() {
         if (res.ok) {
           const data = (await res.json()) as BootstrapStatus;
           setBootstrap(data);
+          if (data.canRegisterFirstAdmin) {
+            setMode('first-admin');
+          }
         }
       } catch {
         // Ignore network errors
@@ -66,13 +80,6 @@ export function LoginPage() {
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    if (!supabase) {
-      setErrorMsg(
-        'Konfigurasi Supabase belum tersedia. Pastikan VITE_SUPABASE_URL dan VITE_SUPABASE_ANON_KEY telah diisi di environment.',
-      );
-      return;
-    }
-
     if (!email.trim() || !password) {
       setErrorMsg('Email dan kata sandi wajib diisi.');
       return;
@@ -80,6 +87,38 @@ export function LoginPage() {
 
     setSubmitting(true);
     try {
+      if (getAppMode() === 'local') {
+        const res = await fetch('/api/local/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: email.trim().toLowerCase(),
+            password,
+          }),
+        });
+        const payload = (await res.json()) as {
+          token?: string;
+          profile?: UserProfile;
+          error?: string;
+        };
+
+        if (!res.ok || !payload.token || !payload.profile) {
+          setErrorMsg(payload.error || 'Email atau kata sandi salah.');
+          return;
+        }
+
+        setLocalSession(payload.token, payload.profile);
+        navigate('/app', { replace: true });
+        return;
+      }
+
+      if (!supabase) {
+        setErrorMsg(
+          'Konfigurasi Supabase belum tersedia. Pastikan VITE_SUPABASE_URL dan VITE_SUPABASE_ANON_KEY telah diisi.',
+        );
+        return;
+      }
+
       const { error } = await supabase.auth.signInWithPassword({
         email: email.trim().toLowerCase(),
         password,
@@ -114,6 +153,35 @@ export function LoginPage() {
 
     setSubmitting(true);
     try {
+      // If Supabase mode WITHOUT service role, use standard client signUp
+      if (getAppMode() === 'supabase' && !bootstrap?.hasServiceRole && supabase) {
+        const { data, error: signUpErr } = await supabase.auth.signUp({
+          email: email.trim().toLowerCase(),
+          password,
+          options: {
+            data: {
+              full_name: fullName.trim(),
+              nip: nip.trim() || null,
+              role: 'admin',
+            },
+          },
+        });
+        if (signUpErr) {
+          setErrorMsg(signUpErr.message);
+          return;
+        }
+        if (data.session) {
+          await refreshHealth();
+          navigate('/app', { replace: true });
+          return;
+        }
+        setSuccessMsg(
+          'Akun Administrator berhasil didaftarkan. Periksa email verifikasi Anda lalu login.',
+        );
+        setMode('login');
+        return;
+      }
+
       const res = await fetch('/api/auth/bootstrap-admin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -126,9 +194,21 @@ export function LoginPage() {
         }),
       });
 
-      const payload = (await res.json()) as { error?: string; message?: string };
+      const payload = (await res.json()) as {
+        error?: string;
+        message?: string;
+        token?: string;
+        profile?: UserProfile;
+      };
       if (!res.ok) {
         setErrorMsg(payload.error || 'Gagal membuat akun Administrator pertama.');
+        return;
+      }
+
+      if (getAppMode() === 'local' && payload.token && payload.profile) {
+        setLocalSession(payload.token, payload.profile);
+        await refreshHealth();
+        navigate('/app', { replace: true });
         return;
       }
 
@@ -202,8 +282,8 @@ export function LoginPage() {
             program keahlian TKJ, DKV, AK, BC, MPLB, dan BD.
           </p>
           <div className="mt-8 border-t border-red-400/30 pt-6 text-xs text-red-100">
-            Pengguna pertama yang dibuat pada Supabase Authentication secara otomatis ditetapkan
-            sebagai Administrator sistem.
+            Pengguna pertama yang dibuat pada sistem secara otomatis ditetapkan sebagai
+            Administrator untuk mengelola pengguna dan data siswa.
           </div>
         </div>
       </div>
@@ -227,8 +307,8 @@ export function LoginPage() {
           </h2>
           <p className="mt-1.5 text-sm text-neutral-600">
             {mode === 'login'
-              ? 'Gunakan akun email sekolah yang terdaftar di Supabase Authentication.'
-              : 'Belum ada pengguna terdaftar. Akun pertama otomatis berstatus Administrator.'}
+              ? 'Masukkan email dan kata sandi akun sekolah Anda untuk masuk ke dashboard.'
+              : 'Belum ada pengguna terdaftar. Buat akun Administrator pertama untuk mulai menggunakan website.'}
           </p>
 
           {/* Segmented Toggle only when first user hasn't been created yet */}
@@ -265,58 +345,97 @@ export function LoginPage() {
             </div>
           )}
 
-          {/* System Readiness Notice if env vars or SQL schema are missing */}
-          {(!health.configured || !health.tablesReady) && (
-            <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
+          {/* Local Mode / Supabase Status Card */}
+          {appMode === 'local' ? (
+            <div className="mt-6 rounded-xl border border-neutral-200 bg-neutral-50 p-4 text-xs text-neutral-700">
               <div className="flex items-start gap-2.5">
-                <Database className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                <Database className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
                 <div className="min-w-0 flex-1">
-                  <p className="font-semibold">Status Koneksi &amp; Database Relasional Supabase</p>
-                  <ul className="mt-1.5 space-y-1 text-amber-800">
-                    <li>
-                      • Client Auth (`VITE_SUPABASE_URL` &amp; `VITE_SUPABASE_ANON_KEY`):{' '}
-                      <strong>{health.configured ? 'Terhubung' : 'Belum diisi di Secrets'}</strong>
-                    </li>
-                    <li>
-                      • Admin Sync (`SUPABASE_SERVICE_ROLE_KEY`):{' '}
-                      <strong>{health.hasServiceRole ? 'Terhubung' : 'Belum diisi di Secrets'}</strong>
-                    </li>
-                    <li>
-                      • Migrasi Otomatis (`SUPABASE_DB_URL` - Opsional):{' '}
-                      <strong>{health.hasDbUrl ? 'Aktif' : 'Jalankan SQL manual'}</strong>
-                    </li>
-                    <li>
-                      • Tabel Relasional (`profiles`, `jurusan`, `classes`, `students`, `employee_attendance`, `student_attendance`):{' '}
-                      <strong>{health.tablesReady ? 'Siap' : 'Menunggu schema.sql'}</strong>
-                    </li>
-                  </ul>
+                  <p className="font-semibold text-neutral-900">
+                    Database Relasional Lokal Aktif (Siap Login)
+                  </p>
+                  <p className="mt-1 leading-relaxed text-neutral-600">
+                    Anda dapat langsung membuat akun Administrator dan login sekarang. Untuk
+                    menghubungkan ke Supabase Cloud, isi{' '}
+                    <code className="font-mono text-neutral-900">VITE_SUPABASE_URL</code>,{' '}
+                    <code className="font-mono text-neutral-900">VITE_SUPABASE_ANON_KEY</code>, dan{' '}
+                    <code className="font-mono text-neutral-900">SUPABASE_SERVICE_ROLE_KEY</code>{' '}
+                    pada panel Secrets.
+                  </p>
                   {health.schemaSql && (
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <div className="mt-2.5 flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => setShowSql((prev) => !prev)}
-                        className="rounded-md border border-amber-300 bg-white px-2.5 py-1 font-semibold text-amber-900 hover:bg-amber-100"
+                        className="rounded-md border border-neutral-300 bg-white px-2.5 py-1 font-semibold text-neutral-800 hover:bg-neutral-100"
                       >
-                        {showSql ? 'Sembunyikan SQL Schema' : 'Lihat SQL Schema'}
+                        {showSql ? 'Tutup schema.sql' : 'Lihat schema.sql Supabase'}
                       </button>
                       <button
                         type="button"
                         onClick={handleCopySql}
-                        className="inline-flex items-center gap-1 rounded-md bg-amber-900 px-2.5 py-1 font-semibold text-white hover:bg-amber-950"
+                        className="inline-flex items-center gap-1 rounded-md border border-neutral-300 bg-white px-2.5 py-1 font-semibold text-neutral-800 hover:bg-neutral-100"
                       >
-                        {copiedSql ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                        {copiedSql ? (
+                          <Check className="h-3 w-3 text-emerald-600" />
+                        ) : (
+                          <Copy className="h-3 w-3" />
+                        )}
                         <span>{copiedSql ? 'Tersalin' : 'Salin schema.sql'}</span>
                       </button>
                     </div>
                   )}
                   {showSql && health.schemaSql && (
-                    <pre className="mt-3 max-h-48 overflow-auto rounded-lg border border-amber-200 bg-neutral-900 p-3 font-mono text-[11px] text-neutral-100">
+                    <pre className="mt-3 max-h-48 overflow-auto rounded-lg border border-neutral-200 bg-neutral-900 p-3 font-mono text-[11px] text-neutral-100">
                       {health.schemaSql}
                     </pre>
                   )}
                 </div>
               </div>
             </div>
+          ) : (
+            !health.tablesReady && (
+              <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900">
+                <div className="flex items-start gap-2.5">
+                  <Database className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-semibold">Skema Tabel atau Hak Akses Supabase Belum Siap</p>
+                    <p className="mt-1 text-amber-800">
+                      Salin SQL berikut lalu jalankan di SQL Editor Supabase Dashboard Anda.
+                    </p>
+                    {bootstrap && (bootstrap as { error?: string }).error && (
+                      <p className="mt-1.5 font-mono text-[11px] text-red-700">
+                        Detail: {(bootstrap as { error?: string }).error}
+                      </p>
+                    )}
+                    {health.schemaSql && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowSql((prev) => !prev)}
+                          className="rounded-md border border-amber-300 bg-white px-2.5 py-1 font-semibold text-amber-900 hover:bg-amber-100"
+                        >
+                          {showSql ? 'Sembunyikan SQL Schema' : 'Lihat SQL Schema'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCopySql}
+                          className="inline-flex items-center gap-1 rounded-md bg-amber-900 px-2.5 py-1 font-semibold text-white hover:bg-amber-950"
+                        >
+                          {copiedSql ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                          <span>{copiedSql ? 'Tersalin' : 'Salin schema.sql'}</span>
+                        </button>
+                      </div>
+                    )}
+                    {showSql && health.schemaSql && (
+                      <pre className="mt-3 max-h-48 overflow-auto rounded-lg border border-amber-200 bg-neutral-900 p-3 font-mono text-[11px] text-neutral-100">
+                        {health.schemaSql}
+                      </pre>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )
           )}
 
           {activeError && (
@@ -385,7 +504,7 @@ export function LoginPage() {
 
               <button
                 type="submit"
-                disabled={submitting || !health.configured}
+                disabled={submitting}
                 className="flex w-full items-center justify-center rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? 'Memverifikasi...' : 'Masuk ke Aplikasi'}

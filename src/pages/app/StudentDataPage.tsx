@@ -15,7 +15,15 @@ import {
 } from 'lucide-react';
 import { ConfirmModal } from '../../components/ConfirmModal';
 import { useAuth } from '../../context/AuthContext';
-import { supabase } from '../../lib/supabase';
+import {
+  deleteClassRoomById,
+  deleteStudentById,
+  fetchClassesAndTeachers,
+  fetchStudentAttendanceByStudent,
+  fetchStudents,
+  saveClassRoom,
+  saveStudent,
+} from '../../lib/dataService';
 import { JURUSAN_LIST, STUDENT_STATUS_META, formatShortDate } from '../../lib/constants';
 import type {
   ClassRoom,
@@ -113,7 +121,7 @@ export function StudentDataPage() {
   const [copiedSql, setCopiedSql] = useState(false);
 
   const loadAll = useCallback(async () => {
-    if (!supabase) {
+    if (!session?.access_token) {
       setLoading(false);
       return;
     }
@@ -121,40 +129,19 @@ export function StudentDataPage() {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const [stuRes, clsRes, profRes] = await Promise.all([
-        supabase
-          .from('students')
-          .select('*, classes(id, nama_kelas, tingkat, jurusan_code)')
-          .order('kelas', { ascending: true })
-          .order('nama', { ascending: true }),
-        supabase
-          .from('classes')
-          .select('*, profiles:wali_kelas_id(id, full_name)')
-          .order('jurusan_code', { ascending: true })
-          .order('nama_kelas', { ascending: true }),
-        supabase
-          .from('profiles')
-          .select('id, full_name, role')
-          .in('role', ['admin', 'guru'])
-          .order('full_name', { ascending: true }),
+      const [stuList, clsResult] = await Promise.all([
+        fetchStudents({ accessToken: session.access_token }),
+        fetchClassesAndTeachers(session.access_token),
       ]);
-
-      if (stuRes.error) {
-        setErrorMsg(stuRes.error.message);
-      } else {
-        setStudents((stuRes.data as Student[]) || []);
-      }
-
-      if (!clsRes.error) {
-        setClasses((clsRes.data as ClassRoom[]) || []);
-      }
-      if (!profRes.error) {
-        setTeachers((profRes.data as Pick<UserProfile, 'id' | 'full_name' | 'role'>[]) || []);
-      }
+      setStudents(stuList);
+      setClasses(clsResult.classes);
+      setTeachers(clsResult.teachers);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal memuat data siswa dan kelas.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [session?.access_token]);
 
   const loadDbStatus = useCallback(async () => {
     if (!session?.access_token) return;
@@ -188,26 +175,27 @@ export function StudentDataPage() {
 
   // Load detail attendance when /app/data-siswa/:id is visited
   useEffect(() => {
-    if (!detailStudentId || !supabase) return;
+    if (!detailStudentId || !session?.access_token) return;
     let active = true;
     setLoadingDetail(true);
 
-    supabase
-      .from('student_attendance')
-      .select('*')
-      .eq('student_id', detailStudentId)
-      .order('tanggal', { ascending: false })
-      .limit(30)
-      .then(({ data }) => {
+    fetchStudentAttendanceByStudent({
+      accessToken: session.access_token,
+      studentId: detailStudentId,
+    })
+      .then((rows) => {
         if (!active) return;
-        setDetailAttendance((data as StudentAttendance[]) || []);
+        setDetailAttendance(rows);
         setLoadingDetail(false);
+      })
+      .catch(() => {
+        if (active) setLoadingDetail(false);
       });
 
     return () => {
       active = false;
     };
-  }, [detailStudentId]);
+  }, [detailStudentId, session?.access_token]);
 
   const selectedDetailStudent = useMemo(() => {
     if (!detailStudentId) return null;
@@ -277,7 +265,7 @@ export function StudentDataPage() {
 
   async function handleSubmitForm(e: React.FormEvent) {
     e.preventDefault();
-    if (!supabase) return;
+    if (!session?.access_token) return;
 
     if (!formState.nis.trim() || !formState.nama.trim() || !formState.kelas.trim()) {
       setFormError('NIS, Nama Siswa, dan Kelas wajib diisi.');
@@ -287,61 +275,41 @@ export function StudentDataPage() {
     setSaving(true);
     setFormError(null);
     try {
-      const payload: Record<string, unknown> = {
-        nis: formState.nis.trim(),
-        nama: formState.nama.trim(),
-        kelas: formState.kelas.trim().toUpperCase(),
-        jurusan: formState.jurusan,
-        jenis_kelamin: formState.jenis_kelamin,
-        status: formState.status,
-        updated_at: new Date().toISOString(),
-      };
-      if (formState.class_id) {
-        payload.class_id = formState.class_id;
-      }
-
-      if (editingStudent) {
-        const { error } = await supabase
-          .from('students')
-          .update(payload)
-          .eq('id', editingStudent.id);
-        if (error) {
-          setFormError(error.message);
-          return;
-        }
-      } else {
-        const { error } = await supabase.from('students').insert(payload);
-        if (error) {
-          setFormError(
-            error.message.includes('unique')
-              ? 'NIS tersebut sudah terdaftar pada siswa lain.'
-              : error.message,
-          );
-          return;
-        }
-      }
+      await saveStudent({
+        accessToken: session.access_token,
+        editingId: editingStudent?.id,
+        payload: {
+          nis: formState.nis.trim(),
+          nama: formState.nama.trim(),
+          kelas: formState.kelas.trim().toUpperCase(),
+          class_id: formState.class_id || null,
+          jurusan: formState.jurusan,
+          jenis_kelamin: formState.jenis_kelamin,
+          status: formState.status,
+        },
+      });
 
       setFormOpen(false);
       await loadAll();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Gagal menyimpan data siswa.');
     } finally {
       setSaving(false);
     }
   }
 
   async function handleConfirmDelete() {
-    if (!supabase || !deleteTarget) return;
+    if (!session?.access_token || !deleteTarget) return;
     setDeleting(true);
     try {
-      const { error } = await supabase.from('students').delete().eq('id', deleteTarget.id);
-      if (error) {
-        setErrorMsg(error.message);
-      } else {
-        if (detailStudentId === deleteTarget.id) {
-          navigate('/app/data-siswa', { replace: true });
-        }
-        await loadAll();
+      await deleteStudentById({ accessToken: session.access_token, id: deleteTarget.id });
+      if (detailStudentId === deleteTarget.id) {
+        navigate('/app/data-siswa', { replace: true });
       }
+      await loadAll();
       setDeleteTarget(null);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghapus siswa.');
     } finally {
       setDeleting(false);
     }
@@ -369,7 +337,7 @@ export function StudentDataPage() {
 
   async function handleSubmitClass(e: React.FormEvent) {
     e.preventDefault();
-    if (!supabase) return;
+    if (!session?.access_token) return;
     if (!classForm.nama_kelas.trim()) {
       setClassError('Nama kelas wajib diisi.');
       return;
@@ -378,49 +346,39 @@ export function StudentDataPage() {
     setSavingClass(true);
     setClassError(null);
     try {
-      const payload = {
-        nama_kelas: classForm.nama_kelas.trim().toUpperCase(),
-        tingkat: classForm.tingkat,
-        jurusan_code: classForm.jurusan_code,
-        wali_kelas_id: classForm.wali_kelas_id || null,
-        tahun_ajaran: classForm.tahun_ajaran.trim() || '2026/2027',
-      };
-
-      if (editingClass) {
-        const { error } = await supabase
-          .from('classes')
-          .update(payload)
-          .eq('id', editingClass.id);
-        if (error) {
-          setClassError(error.message);
-          return;
-        }
-      } else {
-        const { error } = await supabase.from('classes').insert(payload);
-        if (error) {
-          setClassError(error.message);
-          return;
-        }
-      }
+      await saveClassRoom({
+        accessToken: session.access_token,
+        editingId: editingClass?.id,
+        payload: {
+          nama_kelas: classForm.nama_kelas.trim().toUpperCase(),
+          tingkat: classForm.tingkat,
+          jurusan_code: classForm.jurusan_code,
+          wali_kelas_id: classForm.wali_kelas_id || null,
+          tahun_ajaran: classForm.tahun_ajaran.trim() || '2026/2027',
+        },
+      });
 
       setClassModalOpen(false);
       await loadAll();
+    } catch (err) {
+      setClassError(err instanceof Error ? err.message : 'Gagal menyimpan kelas.');
     } finally {
       setSavingClass(false);
     }
   }
 
   async function handleConfirmDeleteClass() {
-    if (!supabase || !deleteClassTarget) return;
+    if (!session?.access_token || !deleteClassTarget) return;
     setDeleting(true);
     try {
-      const { error } = await supabase.from('classes').delete().eq('id', deleteClassTarget.id);
-      if (error) {
-        setErrorMsg(error.message);
-      } else {
-        await loadAll();
-      }
+      await deleteClassRoomById({
+        accessToken: session.access_token,
+        id: deleteClassTarget.id,
+      });
+      await loadAll();
       setDeleteClassTarget(null);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal menghapus kelas.');
     } finally {
       setDeleting(false);
     }

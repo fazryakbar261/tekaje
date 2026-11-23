@@ -1,17 +1,28 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Session, User } from '@supabase/supabase-js';
-import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { getAppMode, initRuntimeConfig, supabase } from '../lib/supabase';
+import { clearLocalToken, getLocalToken, setLocalToken } from '../lib/dataService';
 import type { SystemHealth, UserProfile } from '../types';
 
+export interface ActiveSession {
+  access_token: string;
+  user: {
+    id: string;
+    email?: string;
+  };
+}
+
 interface AuthContextValue {
-  session: Session | null;
-  user: User | null;
+  session: ActiveSession | null;
+  user: User | { id: string; email?: string } | null;
   profile: UserProfile | null;
   loading: boolean;
   authError: string | null;
   health: SystemHealth;
+  appMode: 'supabase' | 'local';
   refreshHealth: () => Promise<void>;
   refreshProfile: () => Promise<void>;
+  setLocalSession: (token: string, nextProfile: UserProfile) => void;
   signOut: () => Promise<void>;
   clearAuthError: () => void;
 }
@@ -19,13 +30,15 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<ActiveSession | null>(null);
+  const [user, setUser] = useState<User | { id: string; email?: string } | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [appMode, setAppMode] = useState<'supabase' | 'local'>(getAppMode());
   const [health, setHealth] = useState<SystemHealth>({
-    configured: isSupabaseConfigured,
+    mode: getAppMode(),
+    configured: true,
     hasServiceRole: false,
     tablesReady: false,
     userCount: 0,
@@ -37,13 +50,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (res.ok) {
         const data = (await res.json()) as SystemHealth;
         setHealth(data);
+        if (data.mode) setAppMode(data.mode);
       }
     } catch {
       // Ignore network errors during health check
     }
   }, []);
 
-  const loadUserProfile = useCallback(async (activeSession: Session | null) => {
+  const loadSupabaseUserProfile = useCallback(async (activeSession: Session | null) => {
     if (!activeSession || !supabase) {
       setProfile(null);
       return;
@@ -69,7 +83,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    // Sync via server endpoint (auto-assigns admin role to the first user in Supabase Auth)
     try {
       const syncRes = await fetch('/api/auth/sync-profile', {
         method: 'POST',
@@ -95,7 +108,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Fall through if server sync unavailable
     }
 
-    // Fallback minimal profile from auth metadata if tables are ready without service role
     const metaRole = activeSession.user.user_metadata?.role;
     const fallbackRole =
       metaRole === 'admin' || metaRole === 'guru' || metaRole === 'tenaga_kependidikan'
@@ -117,17 +129,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const setLocalSession = useCallback((token: string, nextProfile: UserProfile) => {
+    setLocalToken(token);
+    setSession({
+      access_token: token,
+      user: { id: nextProfile.id, email: nextProfile.email },
+    });
+    setUser({ id: nextProfile.id, email: nextProfile.email });
+    setProfile(nextProfile);
+    setAuthError(null);
+  }, []);
+
   const refreshProfile = useCallback(async () => {
+    if (getAppMode() === 'local') {
+      const token = getLocalToken();
+      if (!token) return;
+      const res = await fetch('/api/local/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { profile: UserProfile };
+        setProfile(data.profile);
+      }
+      return;
+    }
+
     if (!supabase) return;
     const { data } = await supabase.auth.getSession();
-    await loadUserProfile(data.session);
-  }, [loadUserProfile]);
+    await loadSupabaseUserProfile(data.session);
+  }, [loadSupabaseUserProfile]);
 
   useEffect(() => {
     let mounted = true;
+    let unsubscribe: (() => void) | null = null;
 
     async function init() {
+      const detectedMode = await initRuntimeConfig();
+      if (!mounted) return;
+      setAppMode(detectedMode);
       await refreshHealth();
+
+      if (detectedMode === 'local') {
+        const token = getLocalToken();
+        if (token) {
+          try {
+            const res = await fetch('/api/local/auth/me', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok && mounted) {
+              const payload = (await res.json()) as { profile: UserProfile };
+              setSession({
+                access_token: token,
+                user: { id: payload.profile.id, email: payload.profile.email },
+              });
+              setUser({ id: payload.profile.id, email: payload.profile.email });
+              setProfile(payload.profile);
+            } else {
+              clearLocalToken();
+            }
+          } catch {
+            clearLocalToken();
+          }
+        }
+        if (mounted) setLoading(false);
+        return;
+      }
 
       if (!supabase) {
         if (mounted) setLoading(false);
@@ -137,40 +203,55 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const { data } = await supabase.auth.getSession();
       if (!mounted) return;
 
-      setSession(data.session);
+      setSession(
+        data.session
+          ? {
+              access_token: data.session.access_token,
+              user: { id: data.session.user.id, email: data.session.user.email },
+            }
+          : null,
+      );
       setUser(data.session?.user ?? null);
 
       if (data.session) {
-        await loadUserProfile(data.session);
+        await loadSupabaseUserProfile(data.session);
       }
       if (mounted) setLoading(false);
+
+      const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+        if (!mounted) return;
+        setSession(
+          nextSession
+            ? {
+                access_token: nextSession.access_token,
+                user: { id: nextSession.user.id, email: nextSession.user.email },
+              }
+            : null,
+        );
+        setUser(nextSession?.user ?? null);
+        if (nextSession) {
+          loadSupabaseUserProfile(nextSession).finally(() => {
+            if (mounted) setLoading(false);
+          });
+        } else {
+          setProfile(null);
+          setLoading(false);
+        }
+      });
+
+      unsubscribe = () => subscription.subscription.unsubscribe();
     }
 
     init();
 
-    if (!supabase) return;
-
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (!mounted) return;
-      setSession(nextSession);
-      setUser(nextSession?.user ?? null);
-      if (nextSession) {
-        loadUserProfile(nextSession).finally(() => {
-          if (mounted) setLoading(false);
-        });
-      } else {
-        setProfile(null);
-        setLoading(false);
-      }
-    });
-
     return () => {
       mounted = false;
-      subscription.subscription.unsubscribe();
+      if (unsubscribe) unsubscribe();
     };
-  }, [loadUserProfile, refreshHealth]);
+  }, [loadSupabaseUserProfile, refreshHealth]);
 
   const signOut = useCallback(async () => {
+    clearLocalToken();
     if (supabase) {
       await supabase.auth.signOut();
     }
@@ -190,8 +271,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         authError,
         health,
+        appMode,
         refreshHealth,
         refreshProfile,
+        setLocalSession,
         signOut,
         clearAuthError,
       }}

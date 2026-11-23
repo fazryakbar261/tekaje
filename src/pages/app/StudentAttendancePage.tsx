@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { CheckCheck, Save, Search } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { supabase } from '../../lib/supabase';
+import {
+  fetchStudentAttendanceByDate,
+  fetchStudents,
+  saveStudentAttendanceBulk,
+} from '../../lib/dataService';
 import {
   JURUSAN_LIST,
   STUDENT_STATUS_META,
@@ -15,7 +19,7 @@ interface AttendanceDraft {
 }
 
 export function StudentAttendancePage() {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const [tanggal, setTanggal] = useState(getTodayIsoDate());
   const [jurusanFilter, setJurusanFilter] = useState<'ALL' | JurusanCode>('ALL');
   const [kelasFilter, setKelasFilter] = useState<string>('ALL');
@@ -30,7 +34,7 @@ export function StudentAttendancePage() {
   );
 
   const loadStudentsAndAttendance = useCallback(async () => {
-    if (!supabase) {
+    if (!session?.access_token) {
       setLoading(false);
       return;
     }
@@ -38,34 +42,18 @@ export function StudentAttendancePage() {
     setLoading(true);
     setFeedback(null);
     try {
-      const [{ data: studentRows, error: stuErr }, { data: attRows, error: attErr }] =
-        await Promise.all([
-          supabase
-            .from('students')
-            .select('*, classes(id, nama_kelas, tingkat, jurusan_code)')
-            .eq('status', 'aktif')
-            .order('kelas', { ascending: true })
-            .order('nama', { ascending: true }),
-          supabase.from('student_attendance').select('*').eq('tanggal', tanggal),
-        ]);
+      const [activeStudents, attRows] = await Promise.all([
+        fetchStudents({ accessToken: session.access_token, onlyActive: true }),
+        fetchStudentAttendanceByDate({ accessToken: session.access_token, tanggal }),
+      ]);
 
-      if (stuErr) {
-        setFeedback({ type: 'error', text: stuErr.message });
-        return;
-      }
-      if (attErr) {
-        setFeedback({ type: 'error', text: attErr.message });
-        return;
-      }
-
-      const activeStudents = (studentRows as Student[]) || [];
       setStudents(activeStudents);
 
       const existingMap = new Map<string, { status: StudentAttendanceStatus; catatan: string }>();
-      for (const row of attRows || []) {
-        existingMap.set(row.student_id as string, {
-          status: row.status as StudentAttendanceStatus,
-          catatan: (row.catatan as string) || '',
+      for (const row of attRows) {
+        existingMap.set(row.student_id, {
+          status: row.status,
+          catatan: row.catatan || '',
         });
       }
 
@@ -77,10 +65,15 @@ export function StudentAttendancePage() {
         };
       }
       setDrafts(nextDrafts);
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Gagal memuat data siswa.',
+      });
     } finally {
       setLoading(false);
     }
-  }, [tanggal]);
+  }, [session?.access_token, tanggal]);
 
   useEffect(() => {
     loadStudentsAndAttendance();
@@ -142,12 +135,11 @@ export function StudentAttendancePage() {
   }
 
   async function handleSaveAll() {
-    if (!supabase || !profile || filteredStudents.length === 0) return;
+    if (!profile || !session?.access_token || filteredStudents.length === 0) return;
 
     setSaving(true);
     setFeedback(null);
     try {
-      const nowIso = new Date().toISOString();
       const payload = filteredStudents.map((stu) => {
         const draft = drafts[stu.id] || { status: 'hadir' as StudentAttendanceStatus, catatan: '' };
         return {
@@ -155,23 +147,23 @@ export function StudentAttendancePage() {
           tanggal,
           status: draft.status,
           catatan: draft.catatan.trim() || null,
-          recorded_by: profile.id,
-          updated_at: nowIso,
         };
       });
 
-      const { error } = await supabase
-        .from('student_attendance')
-        .upsert(payload, { onConflict: 'student_id,tanggal' });
-
-      if (error) {
-        setFeedback({ type: 'error', text: `Gagal menyimpan absensi siswa: ${error.message}` });
-        return;
-      }
+      await saveStudentAttendanceBulk({
+        accessToken: session.access_token,
+        recordedBy: profile.id,
+        records: payload,
+      });
 
       setFeedback({
         type: 'success',
         text: `Berhasil menyimpan absensi untuk ${payload.length} siswa pada tanggal ${tanggal}.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: `Gagal menyimpan absensi siswa: ${err instanceof Error ? err.message : 'Kesalahan sistem'}`,
       });
     } finally {
       setSaving(false);

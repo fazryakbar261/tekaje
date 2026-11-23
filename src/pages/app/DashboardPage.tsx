@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, Calendar, CheckCircle2, Clock } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { supabase } from '../../lib/supabase';
+import { fetchDashboardData } from '../../lib/dataService';
 import {
   EMPLOYEE_STATUS_META,
   ROLE_LABELS,
@@ -15,7 +15,7 @@ import {
 import type { EmployeeAttendance, StudentAttendance } from '../../types';
 
 export function DashboardPage() {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const today = getTodayIsoDate();
   const monthPrefix = getCurrentMonthPrefix();
 
@@ -35,103 +35,28 @@ export function DashboardPage() {
     let active = true;
 
     async function fetchDashboard() {
-      if (!supabase || !profile) {
+      if (!profile || !session?.access_token) {
         setLoading(false);
         return;
       }
 
       setLoading(true);
       try {
-        // 1. Personal attendance today
-        const { data: mineToday } = await supabase
-          .from('employee_attendance')
-          .select('*')
-          .eq('user_id', profile.id)
-          .eq('tanggal', today)
-          .maybeSingle();
-
-        // 2. Personal attendance this month
-        const { count: monthTotal } = await supabase
-          .from('employee_attendance')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', profile.id)
-          .gte('tanggal', `${monthPrefix}-01`);
-
+        const data = await fetchDashboardData({
+          profile,
+          accessToken: session.access_token,
+          today,
+          monthPrefix,
+        });
         if (!active) return;
-        setMyTodayAttendance((mineToday as EmployeeAttendance | null) ?? null);
-        setMyMonthCount(monthTotal ?? 0);
-
-        // 3. Role-specific aggregate queries
-        if (role === 'admin') {
-          const [empCountRes, empTodayRes, stuCountRes, stuTodayRes, recentEmpRes] =
-            await Promise.all([
-              supabase
-                .from('profiles')
-                .select('id', { count: 'exact', head: true })
-                .eq('is_active', true),
-              supabase
-                .from('employee_attendance')
-                .select('id', { count: 'exact', head: true })
-                .eq('tanggal', today)
-                .eq('status', 'hadir'),
-              supabase
-                .from('students')
-                .select('id', { count: 'exact', head: true })
-                .eq('status', 'aktif'),
-              supabase
-                .from('student_attendance')
-                .select('id', { count: 'exact', head: true })
-                .eq('tanggal', today)
-                .eq('status', 'hadir'),
-              supabase
-                .from('employee_attendance')
-                .select('*, profiles(full_name, email, nip, role, jabatan)')
-                .eq('tanggal', today)
-                .order('created_at', { ascending: false })
-                .limit(8),
-            ]);
-
-          if (!active) return;
-          setTotalEmployees(empCountRes.count ?? 0);
-          setPresentEmployeesToday(empTodayRes.count ?? 0);
-          setTotalStudents(stuCountRes.count ?? 0);
-          setPresentStudentsToday(stuTodayRes.count ?? 0);
-          setRecentEmployeeLogs((recentEmpRes.data as EmployeeAttendance[]) || []);
-        } else if (role === 'guru') {
-          const [stuCountRes, stuTodayRes, recentStuRes] = await Promise.all([
-            supabase
-              .from('students')
-              .select('id', { count: 'exact', head: true })
-              .eq('status', 'aktif'),
-            supabase
-              .from('student_attendance')
-              .select('id', { count: 'exact', head: true })
-              .eq('tanggal', today)
-              .eq('status', 'hadir'),
-            supabase
-              .from('student_attendance')
-              .select('*, students(nis, nama, kelas, jurusan)')
-              .eq('tanggal', today)
-              .order('created_at', { ascending: false })
-              .limit(8),
-          ]);
-
-          if (!active) return;
-          setTotalStudents(stuCountRes.count ?? 0);
-          setPresentStudentsToday(stuTodayRes.count ?? 0);
-          setRecentStudentLogs((recentStuRes.data as StudentAttendance[]) || []);
-        } else {
-          // Tenaga kependidikan: personal recent history
-          const { data: myHistory } = await supabase
-            .from('employee_attendance')
-            .select('*')
-            .eq('user_id', profile.id)
-            .order('tanggal', { ascending: false })
-            .limit(7);
-
-          if (!active) return;
-          setRecentEmployeeLogs((myHistory as EmployeeAttendance[]) || []);
-        }
+        setMyTodayAttendance(data.myTodayAttendance);
+        setMyMonthCount(data.myMonthCount);
+        setTotalEmployees(data.totalEmployees);
+        setPresentEmployeesToday(data.presentEmployeesToday);
+        setTotalStudents(data.totalStudents);
+        setPresentStudentsToday(data.presentStudentsToday);
+        setRecentEmployeeLogs(data.recentEmployeeLogs);
+        setRecentStudentLogs(data.recentStudentLogs);
       } finally {
         if (active) setLoading(false);
       }
@@ -141,7 +66,7 @@ export function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [profile, role, today, monthPrefix]);
+  }, [profile, session?.access_token, today, monthPrefix]);
 
   return (
     <div className="space-y-6">

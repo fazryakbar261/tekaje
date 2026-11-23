@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, Clock, LogIn, LogOut as LogOutIcon } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { supabase } from '../../lib/supabase';
+import {
+  checkOutMyEmployeeAttendance,
+  fetchMyEmployeeAttendance,
+  upsertMyEmployeeAttendance,
+} from '../../lib/dataService';
 import {
   EMPLOYEE_STATUS_META,
   formatIndonesianDate,
@@ -13,7 +17,7 @@ import {
 import type { EmployeeAttendance, EmployeeAttendanceStatus } from '../../types';
 
 export function EmployeeAttendancePage() {
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
   const today = getTodayIsoDate();
 
   const [now, setNow] = useState(() => new Date());
@@ -35,7 +39,7 @@ export function EmployeeAttendancePage() {
   }, []);
 
   const loadData = useCallback(async () => {
-    if (!supabase || !profile) {
+    if (!profile || !session?.access_token) {
       setLoading(false);
       return;
     }
@@ -47,37 +51,29 @@ export function EmployeeAttendancePage() {
       const endDay = new Date(Number(yearStr), Number(monthStr), 0).getDate();
       const endMonth = `${selectedMonth}-${String(endDay).padStart(2, '0')}`;
 
-      const [{ data: todayData }, { data: historyData, error: histErr }] = await Promise.all([
-        supabase
-          .from('employee_attendance')
-          .select('*')
-          .eq('user_id', profile.id)
-          .eq('tanggal', today)
-          .maybeSingle(),
-        supabase
-          .from('employee_attendance')
-          .select('*')
-          .eq('user_id', profile.id)
-          .gte('tanggal', startMonth)
-          .lte('tanggal', endMonth)
-          .order('tanggal', { ascending: false }),
-      ]);
+      const data = await fetchMyEmployeeAttendance({
+        userId: profile.id,
+        accessToken: session.access_token,
+        today,
+        startMonth,
+        endMonth,
+      });
 
-      if (histErr) {
-        setFeedback({ type: 'error', text: histErr.message });
+      setTodayRecord(data.todayRecord);
+      if (data.todayRecord) {
+        setStatus(data.todayRecord.status);
+        setCatatan(data.todayRecord.catatan || '');
       }
-
-      const typedToday = (todayData as EmployeeAttendance | null) ?? null;
-      setTodayRecord(typedToday);
-      if (typedToday) {
-        setStatus(typedToday.status);
-        setCatatan(typedToday.catatan || '');
-      }
-      setHistory((historyData as EmployeeAttendance[]) || []);
+      setHistory(data.history);
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Gagal memuat data absensi.',
+      });
     } finally {
       setLoading(false);
     }
-  }, [profile, selectedMonth, today]);
+  }, [profile, session?.access_token, selectedMonth, today]);
 
   useEffect(() => {
     loadData();
@@ -85,60 +81,55 @@ export function EmployeeAttendancePage() {
 
   async function handleCheckIn(e: React.FormEvent) {
     e.preventDefault();
-    if (!supabase || !profile) return;
+    if (!profile || !session?.access_token) return;
 
     setSubmitting(true);
     setFeedback(null);
 
     try {
       const nowIso = new Date().toISOString();
-      const { error } = await supabase.from('employee_attendance').upsert(
-        {
-          user_id: profile.id,
-          tanggal: today,
-          jam_masuk: todayRecord?.jam_masuk || nowIso,
-          status,
-          catatan: catatan.trim() || null,
-          updated_at: nowIso,
-        },
-        { onConflict: 'user_id,tanggal' },
-      );
-
-      if (error) {
-        setFeedback({ type: 'error', text: `Gagal menyimpan absensi: ${error.message}` });
-        return;
-      }
+      await upsertMyEmployeeAttendance({
+        userId: profile.id,
+        accessToken: session.access_token,
+        tanggal: today,
+        jam_masuk: todayRecord?.jam_masuk || nowIso,
+        status,
+        catatan: catatan.trim() || null,
+      });
 
       setFeedback({ type: 'success', text: 'Absensi masuk berhasil dicatat.' });
       await loadData();
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: `Gagal menyimpan absensi: ${err instanceof Error ? err.message : 'Kesalahan sistem'}`,
+      });
     } finally {
       setSubmitting(false);
     }
   }
 
   async function handleCheckOut() {
-    if (!supabase || !profile || !todayRecord) return;
+    if (!profile || !todayRecord || !session?.access_token) return;
 
     setSubmitting(true);
     setFeedback(null);
     try {
       const nowIso = new Date().toISOString();
-      const { error } = await supabase
-        .from('employee_attendance')
-        .update({
-          jam_pulang: nowIso,
-          catatan: catatan.trim() || todayRecord.catatan,
-          updated_at: nowIso,
-        })
-        .eq('id', todayRecord.id);
-
-      if (error) {
-        setFeedback({ type: 'error', text: `Gagal mencatat jam pulang: ${error.message}` });
-        return;
-      }
+      await checkOutMyEmployeeAttendance({
+        recordId: todayRecord.id,
+        accessToken: session.access_token,
+        jam_pulang: nowIso,
+        catatan: catatan.trim() || todayRecord.catatan,
+      });
 
       setFeedback({ type: 'success', text: 'Jam pulang berhasil dicatat.' });
       await loadData();
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: `Gagal mencatat jam pulang: ${err instanceof Error ? err.message : 'Kesalahan sistem'}`,
+      });
     } finally {
       setSubmitting(false);
     }

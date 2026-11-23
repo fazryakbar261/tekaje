@@ -380,3 +380,13 @@ create index if not exists idx_employee_attendance_tanggal on public.employee_at
 create index if not exists idx_employee_attendance_user_tanggal on public.employee_attendance(user_id, tanggal);
 create index if not exists idx_student_attendance_tanggal on public.student_attendance(tanggal);
 create index if not exists idx_student_attendance_student_tanggal on public.student_attendance(student_id, tanggal);
+
+-- 15. Grant Hak Akses Schema & Tabel ke Role Supabase (anon, authenticated, service_role)
+grant usage on schema public to anon, authenticated, service_role;
+grant all privileges on all tables in schema public to service_role;
+grant all privileges on all sequences in schema public to service_role;
+grant all privileges on all routines in schema public to service_role;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
+grant select on public.jurusan, public.classes to anon;
+

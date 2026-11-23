@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Download, Search } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/AuthContext';
+import { fetchStudentAttendanceRange, fetchStudents } from '../../lib/dataService';
 import {
   JURUSAN_LIST,
   STUDENT_STATUS_META,
@@ -25,6 +26,7 @@ interface AggregatedStudentRow {
 export function StudentRecapPage() {
   const { kelas: kelasParam } = useParams<{ kelas?: string }>();
   const navigate = useNavigate();
+  const { session } = useAuth();
 
   const monthPrefix = getCurrentMonthPrefix();
   const [startDate, setStartDate] = useState(`${monthPrefix}-01`);
@@ -48,7 +50,7 @@ export function StudentRecapPage() {
   }, [kelasParam]);
 
   const loadData = useCallback(async () => {
-    if (!supabase) {
+    if (!session?.access_token) {
       setLoading(false);
       return;
     }
@@ -56,36 +58,23 @@ export function StudentRecapPage() {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const [{ data: stuData, error: stuErr }, { data: attData, error: attErr }] =
-        await Promise.all([
-          supabase
-            .from('students')
-            .select('*, classes(id, nama_kelas, tingkat, jurusan_code)')
-            .order('kelas', { ascending: true })
-            .order('nama', { ascending: true }),
-          supabase
-            .from('student_attendance')
-            .select('*, students(nis, nama, kelas, jurusan), recorder:recorded_by(full_name)')
-            .gte('tanggal', startDate)
-            .lte('tanggal', endDate)
-            .order('tanggal', { ascending: false }),
-        ]);
+      const [stuData, attData] = await Promise.all([
+        fetchStudents({ accessToken: session.access_token }),
+        fetchStudentAttendanceRange({
+          accessToken: session.access_token,
+          startDate,
+          endDate,
+        }),
+      ]);
 
-      if (stuErr) {
-        setErrorMsg(stuErr.message);
-        return;
-      }
-      if (attErr) {
-        setErrorMsg(attErr.message);
-        return;
-      }
-
-      setStudents((stuData as Student[]) || []);
-      setAttendanceLogs((attData as StudentAttendance[]) || []);
+      setStudents(stuData);
+      setAttendanceLogs(attData);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Gagal memuat rekap siswa.');
     } finally {
       setLoading(false);
     }
-  }, [startDate, endDate]);
+  }, [session?.access_token, startDate, endDate]);
 
   useEffect(() => {
     loadData();

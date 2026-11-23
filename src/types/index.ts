@@ -85,6 +85,7 @@ export interface DatabaseTableStatus {
 }
 
 export interface SystemHealth {
+  mode?: 'supabase' | 'local';
   configured: boolean;
   hasServiceRole: boolean;
   hasDbUrl?: boolean;
