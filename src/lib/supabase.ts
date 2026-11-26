@@ -103,12 +103,20 @@ export async function initRuntimeConfig(force = false): Promise<'supabase' | 'lo
           });
         }
       } else if (cfg.mode === 'local') {
-        isSupabaseConfigured = false;
-        supabase = null;
+        if (checkConfigured(import.meta.env.VITE_SUPABASE_URL || '', import.meta.env.VITE_SUPABASE_ANON_KEY || '')) {
+          runtimeMode = 'supabase';
+        } else {
+          isSupabaseConfigured = false;
+          supabase = null;
+        }
       }
+    } else if (checkConfigured(runtimeUrl, runtimeAnonKey)) {
+      runtimeMode = 'supabase';
     }
   } catch {
-    // Fallback to build-time env vars and allow retry
+    if (checkConfigured(runtimeUrl, runtimeAnonKey)) {
+      runtimeMode = 'supabase';
+    }
   }
 
   return runtimeMode;

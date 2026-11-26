@@ -66,9 +66,26 @@ export function LoginPage() {
           if (parsed.data.canRegisterFirstAdmin) {
             setMode('first-admin');
           }
+          return;
         }
       } catch {
-        // Ignore network errors
+        // Ignore network errors and try client Supabase fallback
+      }
+
+      if (supabase) {
+        const { count, error } = await supabase
+          .from('profiles')
+          .select('id', { count: 'exact' })
+          .limit(1);
+        const canReg = !error && (count ?? 0) === 0;
+        setBootstrap({
+          mode: 'supabase',
+          configured: true,
+          hasServiceRole: false,
+          tablesReady: !error,
+          canRegisterFirstAdmin: canReg,
+        });
+        if (canReg) setMode('first-admin');
       }
     }
     checkBootstrap();
@@ -97,6 +114,12 @@ export function LoginPage() {
             password,
           }),
         });
+        if (res.status === 404) {
+          setErrorMsg(
+            'Endpoint /api belum aktif pada deployment ini dan Environment Variables Supabase (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY) belum diatur di Vercel. Redeploy perubahan terbaru dengan vercel.json & api/index.ts serta isi Environment Variables Supabase di Vercel.',
+          );
+          return;
+        }
         const parsed = await safeParseJson<{
           token?: string;
           profile?: UserProfile;
